@@ -1,0 +1,133 @@
+{% if aliases %}
+server {
+  server_name {{ aliases|join(" ") }};
+  rewrite ^ http://{{ fqdn }}$request_uri? permanent;
+}
+{% endif %}
+{% if subdomain_to_path_alias %}
+server {
+  server_name {{ subdomain_to_path_alias }};
+  rewrite ^ http://{{ fqdn }}/{{ subdomain_to_path_alias.split('.', 1)[0] }}$request_uri? permanent;
+}
+{% endif %}
+
+{%- if php_upstreams %}
+upstream php-backend {
+  {%- for upstream in php_upstreams %}
+  server {{ upstream }};
+  {%- endfor %}
+}
+{%- elif upstreams %}
+{%- set upstream_name = fqdn|replace(".", "-") ~ "-backend" %}
+upstream {{ upstream_name }} {
+  {%- for upstream in upstreams %}
+  server {{ upstream }} fail_timeout=0;
+  {%- endfor %}
+}
+{%- endif %}
+
+{%- if ssl %}
+server {
+  listen 80;
+  server_name {{ fqdn }};
+  rewrite     ^(.*)   https://{{ fqdn}}$1 permanent;
+}
+{%- endif %}
+
+
+server {
+  {%- if ssl %}
+  listen 443{%- if default %} default deferred {%- endif %};
+  ssl on;
+  ssl_certificate /etc/ssl/certs/{{ fqdn }}.crt;
+  ssl_certificate_key /etc/ssl/private/{{ fqdn }}.key;
+  {%- elif default %}
+  listen 80 default deferred;
+  {%- endif %}
+  server_name {{ fqdn }};
+  client_max_body_size 10m;
+
+  {%- if root %}
+  root {{ root }};
+  {%- endif %}
+
+  access_log  /var/log/nginx/{{ fqdn }}.access.log;
+
+  keepalive_timeout 5;
+
+  location = /robots.txt {
+    access_log off;
+    log_not_found off;
+  }
+
+  location = /favicon.ico {
+    expires 3M;
+    access_log off;
+    log_not_found off;
+  }
+
+  {%- if static_prefix %}
+  location {{ static_prefix }} {
+    {%- if upstreams %}
+    try_files $uri @{{ upstream_name }};
+    {%- endif %}
+    expires max;
+    access_log off;
+  }
+
+  {%- else %}
+  location ~* \.(jpg|jpeg|gif|css|png|js|ico)$ {
+    {%- if upstreams %}
+    try_files $uri @{{ upstream_name }};
+    {%- endif %}
+    access_log        off;
+    expires           30d;
+  }
+  {%- endif %}
+
+  location / {
+    {%- if php_upstreams %}
+    index  index.php;
+    {%- elif upstreams %}
+    try_files $uri @{{ upstream_name }};
+    {%- else %}
+    index  index.html;
+    {%- if autoindex %}
+    autoindex on;
+    autoindex_exact_size off;
+    {%- endif %}
+    {%- if append_html_to_path %}
+    try_files $uri $uri/ $uri.html =404;
+    {%- endif %}
+  {%- endif %}
+  }
+
+  {%- if php_upstreams %}
+  location ~ \.php$ {
+    fastcgi_pass php-backend;
+    fastcgi_index index.php;
+    fastcgi_param SCRIPT_FILENAME {{ root }}$fastcgi_script_name;
+    include fastcgi_params;
+    fastcgi_param  QUERY_STRING     $query_string;
+    fastcgi_param  REQUEST_METHOD   $request_method;
+    fastcgi_param  CONTENT_TYPE     $content_type;
+    fastcgi_param  CONTENT_LENGTH   $content_length;
+    fastcgi_intercept_errors        on;
+    fastcgi_ignore_client_abort     off;
+    fastcgi_connect_timeout 60;
+    fastcgi_send_timeout 180;
+    fastcgi_read_timeout 180;
+    fastcgi_buffer_size 128k;
+    fastcgi_buffers 4 256k;
+    fastcgi_busy_buffers_size 256k;
+    fastcgi_temp_file_write_size 256k;
+  }
+  {%- elif upstreams %}
+  location @{{ upstream_name }}  {
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Host $http_host;
+    proxy_redirect off;
+    proxy_pass http://{{ upstream_name }};
+  }
+  {%- endif %}
+}

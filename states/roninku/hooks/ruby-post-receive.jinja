@@ -1,0 +1,42 @@
+#!/bin/bash
+echo "-------------------------------------------------------"
+echo "* Received new Ruby configuration."
+echo "* Hostname: $(hostname)"
+echo "* Target: {{ target }}"
+echo "-------------------------------------------------------"
+
+tmpdir=$(mktemp -d)
+
+exec git archive HEAD | tar -x -C ${tmpdir}
+
+# TODO: add smarter copy-across strategy (with zero downtime?)
+rsync -rvlyc --executability --delete ${tmpdir}/ {{ target }}/
+
+rm -fr ${tmpdir}
+
+if [[ -f {{ target }}/.rvmrc ]]; then
+  echo "* Detected .rvmrc: Trusting it..."
+  test -f /etc/profile.d/rvm.sh && source /etc/profile.d/rvm.sh && rvm rvmrc trust {{ target }}
+fi
+
+if [[ -f {{ target }}/Gemfile ]]; then
+  echo "* Detected Gemfile: installing bundle..."
+  cd {{ target }} && bundle install --without development:test --path vendor/bundle --binstubs bin/
+fi
+
+if [[ -f {{ target }}/Procfile ]]; then
+  echo "* Detected Procfile."
+  {%- set foreman = settings.foreman %}
+  {%- if foreman %}
+  echo "* Configuring foreman."
+  test -x "`which foreman`" || (echo "ERROR: Foreman is required, but could not be found" && exit 1)
+  foreman export {{ foreman.provider }} /etc/supervisor/conf.d/ -u {{ user }} -a {{ appname }} -p {{ foreman.portbase }} -d {{ target }}
+  supervisorctl reload
+  echo "Re-launch reinit..."
+  echo "Re-launch /etc/init.d/workers {{ target }}"
+  # POST launcher {{ target }}/Procfile
+  # eval $web_cmd &
+  # TODO: figure out rails environment
+  {%- endif %}
+fi
+exit 0
